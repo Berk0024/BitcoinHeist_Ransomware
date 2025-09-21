@@ -1,0 +1,157 @@
+"""
+Der zugrunde liegende Programmcode stammt vom Kaggle-Nutzer "lakshay2193" und ist unter folgendem Link zu finden:
+https://www.kaggle.com/code/lakshay2193/bitcoin-transaction-fraud-detection/notebook """
+
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import random
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, LeakyReLU
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.preprocessing import LabelEncoder, StandardScaler, RobustScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
+
+
+# Datei einlesen
+df = pd.read_csv("Pfadname")
+
+# Datenüberblick
+print("Shape:", df.shape)
+print(df.head())
+print(df.describe())
+print(df["label"].value_counts())
+print("Anzahl kategorischer Spalten:", df.select_dtypes(include="object").columns)
+print("Anzahl numerischer Spalten:", df.select_dtypes(include="number").columns)
+print("Fehlende Werte:\n", df.isnull().sum())
+print("Anzahl einzigartiger Adressen:", df["address"].nunique())
+
+# Originaldaten sichern
+old_df = df.copy()
+
+# Unnötige Spalten entfernen
+df.drop(columns=["address", "year", "day"], inplace=True)
+
+# Eingabe- und Zielvariablen festlegen
+X = df.drop(columns=["label"])
+y = df["label"]
+
+print(str(df.head()))
+
+# Gruppierte Statistikdaten erstellen (optional)
+# Aus ursprünglichem Code übernommen, allerdings nicht weiter verwendet
+new_df = pd.DataFrame()
+grouped = df.groupby("label")
+new_df["num_of_instances"] = grouped.size()
+
+for col in X.columns:
+    new_df[f"{col}_avg"] = grouped[col].mean()
+    new_df[f"{col}_std"] = grouped[col].agg(np.std).fillna(0)
+    new_df[f"{col}_min"] = grouped[col].min()
+    new_df[f"{col}_max"] = grouped[col].max()
+
+new_df = new_df.reset_index()
+
+
+# Besser ausbalanciertes Dataset vorbereiten (1:4)
+black_rows = df[df["label"] != "white"]
+white_sample = df[df["label"] == "white"].sample(n=158587, random_state=42)
+sampled_df = pd.concat([black_rows, white_sample]).sample(frac=1, random_state=50)
+
+# Label-Encoding und Binärklassifikation
+label_encoder = LabelEncoder()
+sampled_df["label"] = label_encoder.fit_transform(sampled_df["label"])
+sampled_df["label"] = sampled_df["label"].apply(
+    lambda x: 0 if x == label_encoder.transform(["white"])[0] else 1
+)
+
+# Z-Score Normalisierung (für Ausreißer-Filterung)
+z_score_df = pd.DataFrame()
+for col in sampled_df.columns:
+    z_score_df[f"{col}_z_score"] = (sampled_df[col] - sampled_df[col].mean()) / sampled_df[col].std()
+
+# Optional: Ausreißer-Filter (nicht zwingend notwendig für Modelltraining)
+filtered_df = z_score_df[z_score_df.apply(lambda row: all(-3 <= val <= 3 for val in row), axis=1)]
+
+# Feature- und Zielvariable übergeben
+X = sampled_df.drop("label", axis=1)
+y = sampled_df["label"].astype("int")
+
+# Trainings- und Testsplit
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=True)
+
+# Feature Skalierung vornehmen
+scaler = RobustScaler()
+scaler.fit(X_train)
+
+X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X_train.columns)
+X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
+
+# Neuronales Netz konstruieren
+model = Sequential([
+    Dense(256, activation= "relu", input_shape=(X_train_scaled.shape[1],)),
+    BatchNormalization(),
+    LeakyReLU(),
+    Dropout(0.1),
+
+    Dense(128, activation= "relu"),
+    BatchNormalization(),
+    LeakyReLU(),
+    Dropout(0.1),
+
+    Dense(64, activation= "relu"),
+    BatchNormalization(),
+    LeakyReLU(),
+    Dropout(0.1),
+
+    Dense(1, activation='sigmoid')
+])
+
+# Kompilieren und Training
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# Überwachung des Trainings und dynamische Abbruchkriterien
+early = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
+
+history = model.fit(X_train_scaled, y_train, epochs=100, batch_size=32, validation_split=0.2, callbacks=[early, reduce_lr])
+
+# Auswertung
+test_loss, test_accuracy = model.evaluate(X_test_scaled, y_test)
+print(f"Test Loss: {test_loss:.4f}")
+print(f"Test Accuracy: {test_accuracy:.4f}")
+
+# Accuracy visualisieren
+plt.figure(figsize=(10, 5))
+plt.plot(history.history['accuracy'], label='Train Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.title('Model Accuracy over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend(loc='lower right')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+
+# Vorhersage & Bericht
+y_pred_prob = model.predict(X_test_scaled).ravel()
+y_pred = (y_pred_prob > 0.5).astype("int")
+
+# Konfusionsmatrix erstellen
+cm = confusion_matrix(y_test, y_pred)
+plt.figure(figsize=(5,4))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=["White","Nicht-White",], yticklabels=["White","Nicht-White"])
+plt.xlabel("Vorhergesagt")
+plt.ylabel("Tatsächlich")
+plt.title("Confusion Matrix")
+plt.show()
+
+# Evaluationsmaße ausgeben
+print("Classification Report:\n")
+print(classification_report(y_test, y_pred))
+print("ROC AUC:", roc_auc_score(y_test, y_pred_prob))
